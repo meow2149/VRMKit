@@ -66,7 +66,7 @@ model.automaticUpdates = false
 try model.update(deltaTime: 1 / 60)
 ```
 
-An automatic update failure is stored in `lastError`, calls `onError` if installed, and disables automatic updates. Manual updates throw errors directly.
+An automatic update failure is stored in `lastError`, calls `onError` if installed, and disables automatic updates. Manual updates throw errors directly. With automatic updates disabled, the scene system refreshes lighting and shadows without advancing the instance. For several manually driven avatars, use `try AvatarEntity.update([first, second], deltaTime: 1 / 60)` to evaluate their poses together before rendering shared shadows.
 
 ## Pose and expressions
 
@@ -165,17 +165,69 @@ try clip.write(to: motionURL)
 
 Expression animation nodes encode weights in translation X. Declare them with `setMotionExpressions`. `setMotionLookNode` declares a gaze animation node.
 
-## Materials and rendering scope
+## MToon materials
 
-The RealityKit adapter supports PBR and unlit materials, base/normal/emission/occlusion textures, and the glTF metallic-roughness texture's separate channels. The toon path uses authored shade colors, shade textures, rim factors, emission, alpha cutouts, and outline shells. Configure its explicit light through `RenderOptions` or `model.options`.
+The iOS and macOS custom material path implements the `VRMC_materials_mtoon` 1.0 parameters:
 
-Toon rendering is an approximation, not a complete MToon implementation. Screen-coordinate outline width is approximate, and outline expansion is capped at 0.1 local units for mesh bounds. Matcap, rim/outline/shift textures, UV scrolling, render queues, and complete scene-light/shadow integration are not implemented. On visionOS, toon materials use the unlit fallback because custom materials are unavailable.
+| Feature | Behavior |
+| --- | --- |
+| Toon lighting | Lit/shade colors, shade multiply, shading shift texture and scale, toony boundary, GI equalization |
+| Rim and matcap | Matcap factor/texture, parametric rim color/power/lift, rim multiply, lighting mix |
+| Outlines | World-space meters or screen-height ratio, width multiply, outline color and full surface-lighting mix |
+| UV animation | Scroll, rotation around the UV center, animation-mask blue channel |
+| Texture coordinates | Independent authored UV sets and `KHR_texture_transform` for each slot, plus expression transforms |
+| Sampling | Clamp, repeat, mirrored repeat, nearest/linear magnification and all six glTF minification filters |
+| Color | Linear lighting and factors, sRGB color-image decoding, raw data channels, explicit mip levels |
+| Normals | Authored/morphed/skinned tangents, mirrored UV handedness, derivative basis when tangents are absent, normal strength |
+| Transparency | Opaque, cutout and blend modes, depth-writing transparency, queue offsets, surface/outline ordering |
+| Shadows | Directional, spot and six-face point shadows, animated cutouts, 3×3 filtering, bias and strength controls |
 
-The adapter uses CPU skinning and morphing, and rebuilds a mesh resource only when its geometry changes. Animated dense avatars can be expensive. Toon parameter uploads are synchronous when material values change. This implementation prioritizes a small, readable rendering path over GPU deformation infrastructure.
+All MToon texture slots are handled independently. Shading shift reads red, outline width reads green, and UV animation mask reads blue, so these channels can share an image. Matcap uses view-based coordinates and is not UV animated. Vertex colors are ignored for MToon, as specified by the format. MToon takes precedence over `KHR_materials_unlit`.
 
-The renderer uses one UV transform per material and rejects conflicting texture transforms. It uses default texture sampling, does not reproduce every authored sampler option or normal/occlusion strength, and does not render vertex colors, glTF cameras, or punctual lights. Compressed geometry, compressed texture extensions, extended spring colliders/limits, and animation-pointer channels are outside the supported scope.
+Material colors and transforms from expressions update the parameter texture. UV animation uses `Instance.elapsedTime`, so manual frame updates control its clock too. Surface meshes rebuild only when geometry, mesh mode or outline bounds change.
 
-This repository was authored on Linux. No compilation or runtime verification has been performed. The Apple adapter requires an Apple SDK, and its Metal shader source is compiled on device when toon materials are first loaded.
+## Lighting and shadows
+
+When `model.lights` is empty, the toon renderer reads enabled RealityKit directional, point and spot light entities if `options.sceneLighting` is enabled. If none are found, it uses `options.lightDirection` and `options.lightColor`. `lightDirection` points toward the light; `ToonLight.direction` describes emitted rays. Light and ambient colors are linear RGB.
+
+```swift
+model.lights = [
+    ToonLight(color: SIMD3(1, 0.95, 0.9), direction: SIMD3(-0.3, -0.8, -0.5)),
+    ToonLight(kind: .point, color: SIMD3(0.2, 0.3, 0.5),
+              position: SIMD3(1, 2, 1), range: 4, castsShadow: false)
+]
+model.options.exposure = 1
+model.environment = ToonEnvironment(ambient: SIMD3(repeating: 0.2))
+
+// Supply an equirectangular environment image for directional diffuse lighting.
+try model.setEnvironment(data: environmentData, intensity: 0.8, rotation: .pi / 4)
+```
+
+An explicit light list replaces automatic scene-light discovery. Scene light intensity is converted using `sceneLightIntensityScale`, defaulting to `0.001`; point and spot lights also account for their emission solid angle. Adjust this scale and exposure for your scene. This conversion does not guarantee identical brightness to RealityKit's native PBR pipeline.
+
+`ToonEnvironment` accepts either nine diffuse spherical-harmonic coefficients or linear equirectangular pixels. `setEnvironment` decodes an image and projects it into those coefficients. RealityKit's private environment irradiance and native shadow maps are not read by the custom shader.
+
+Avatars in the same scene cast shadows onto each other's toon surfaces after all poses have updated. The complete deformed avatar casts shadows even when first-person view hides its head. Opaque and masked materials cast shadows; depth-writing blend materials use a binary alpha threshold of `0.5`. Ordinary blend materials do not cast a binary shadow. Outline shells do not cast shadows.
+
+Register external opaque props through `model.shadowOccluders` with their `Geometry` and a world-space `Matrix4`. Update the supplied transform when a prop moves. These props cast onto toon avatars; this API does not make a toon avatar's custom shadow map available to native scene materials.
+
+Defaults allow 16 lights and 12 shadow faces at 512 pixels per face. Each directional or spot light uses one face; a point light uses six. Lights are considered in list order. Lights beyond `maximumLights` are omitted; a light that cannot fit all its shadow faces remains lit without a shadow. Set `shadows = false` to disable shadow passes. `shadowBias` uses projected depth, `shadowNormalBias` uses world units, and `shadowStrength` ranges from zero to one.
+
+## Rendering controls and limits
+
+The renderer orders materials by opaque, cutout, depth-writing blend, then ordinary blend queues, respecting MToon queue offsets. It sorts equal transparent queues from far to near using a RealityKit perspective camera or `model.cameraPosition`. Set the latter each frame for an AR camera. Sorting is per primitive and cannot resolve every overlap inside one transparent mesh.
+
+World outlines retain the authored width, including under nonuniform avatar scaling. Screen outlines use the projection matrix to maintain a screen-height ratio. `outlineBoundsPadding`, defaulting to one local unit, expands mesh bounds for screen outlines. Increase it for very wide outlines or distant views so RealityKit does not cull the expanded shell. Bounds padding does not clamp shader width.
+
+`maximumTextureDimension` and `maximumAtlasDimension` default to 16384. Oversized source images are downsampled, and resources that cannot fit the configured atlases throw an error. Increasing image limits raises memory use. Changing either limit, shadow resolution/face budget, or the light budget recreates rendering resources on the next update.
+
+Non-MToon materials use native PBR or unlit materials with base, normal, emission, occlusion and metallic-roughness channels. Normal and occlusion strengths are baked for the native path. This fallback uses the primary material UV transform and RealityKit's default sampling; independent per-slot sampling is provided by the custom MToon path. On visionOS, MToon uses the native unlit fallback because RealityKit custom materials are unavailable, so custom toon lighting, outlines and custom shadows are omitted.
+
+Skinning and morphing run on the CPU. The custom path expands triangle vertices to carry original UV-table indices; dense animated meshes and multiple shadow passes can be expensive. Static images remain separate from mutable material/light/shadow data, and frame uploads use a shared Metal queue without waiting for GPU completion. RealityKit still controls final output tone mapping.
+
+Compressed geometry and texture extensions, glTF vertex colors in native materials, glTF cameras and punctual-light import, extended spring colliders/limits, and animation-pointer channels are outside the supported scope.
+
+This repository was authored on Linux. No compilation or runtime verification has been performed. The Apple adapter requires an Apple SDK. Its Metal shader source is compiled at runtime when rendering resources are created; visual equivalence across engines and devices has not been verified.
 
 ## Layout
 
@@ -183,7 +235,7 @@ This repository was authored on Linux. No compilation or runtime verification ha
 Package.swift
 Sources/
   VRMKit/         JSON, documents, avatar data, geometry, editing, and runtime
-  VRMRealityKit/  Loader, entities, materials, and one Metal shader
+  VRMRealityKit/  Entities, materials, texture sampling, lighting, shadows, and one Metal shader
 ```
 
 ## License

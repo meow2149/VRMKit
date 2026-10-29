@@ -3,12 +3,14 @@ import Foundation
 public struct MorphTarget: Sendable {
     public let positions: [SIMD3<Float>]
     public let normals: [SIMD3<Float>]
+    public let tangents: [SIMD3<Float>]
 }
 
 public struct Primitive: Sendable {
     public let material: Int?
     public let positions: [SIMD3<Float>]
     public let normals: [SIMD3<Float>]
+    public let tangents: [SIMD4<Float>]
     public let texcoords: [[SIMD2<Float>]]
     public let colors: [SIMD4<Float>]
     public let triangles: [UInt32]
@@ -20,11 +22,12 @@ public struct Primitive: Sendable {
 public struct Geometry: Sendable {
     public var positions: [SIMD3<Float>]
     public var normals: [SIMD3<Float>]
+    public var tangents: [SIMD4<Float>]
     public var texcoords: [SIMD2<Float>]
     public var colors: [SIMD4<Float>]
     public var triangles: [UInt32]
-    public init(positions: [SIMD3<Float>], normals: [SIMD3<Float>] = [], texcoords: [SIMD2<Float>] = [], colors: [SIMD4<Float>] = [], triangles: [UInt32]) {
-        self.positions = positions; self.normals = normals; self.texcoords = texcoords; self.colors = colors; self.triangles = triangles
+    public init(positions: [SIMD3<Float>], normals: [SIMD3<Float>] = [], tangents: [SIMD4<Float>] = [], texcoords: [SIMD2<Float>] = [], colors: [SIMD4<Float>] = [], triangles: [UInt32]) {
+        self.positions = positions; self.normals = normals; self.tangents = tangents; self.texcoords = texcoords; self.colors = colors; self.triangles = triangles
     }
 }
 
@@ -93,12 +96,14 @@ public extension Document {
                     let v = try accessor(index).vectors3()
                     guard v.count == count else { throw VRMError.invalid("Morph target count") }; return v
                 }
-                return MorphTarget(positions: try read("POSITION"), normals: try read("NORMAL"))
+                return MorphTarget(positions: try read("POSITION"), normals: try read("NORMAL"), tangents: try read("TANGENT"))
             }
             let normalValues = try vectors3("NORMAL")
+            let tangentValues = try attributes["TANGENT"].int.map { try accessor($0).vectors4() } ?? []
+            guard tangentValues.isEmpty || tangentValues.count == count else { throw VRMError.invalid("Tangent count") }
             if let material = primitive["material"].int { _ = try entry("materials", at: material) }
             return Primitive(material: primitive["material"].int, positions: positions,
-                normals: normalValues.isEmpty ? Geometry.makeNormals(positions, triangles: triangles) : normalValues,
+                normals: normalValues.isEmpty ? Geometry.makeNormals(positions, triangles: triangles) : normalValues, tangents: tangentValues,
                 texcoords: texcoords, colors: colors, triangles: triangles, jointSets: jointSets, weightSets: weightSets, targets: targets)
         }
     }
@@ -119,18 +124,23 @@ public extension Document {
 
 public extension Primitive {
     func deform(weights: [Float], matrices: [Matrix4] = [], texCoord: Int = 0) throws -> Geometry {
-        var positions = self.positions, normals = self.normals
+        var positions = self.positions, normals = self.normals, tangents = self.tangents
         for (index, target) in targets.enumerated() where weights.indices.contains(index) && weights[index] != 0 {
             let weight = weights[index]
             for vertex in positions.indices {
                 if !target.positions.isEmpty { positions[vertex] += target.positions[vertex] * weight }
                 if !target.normals.isEmpty { normals[vertex] += target.normals[vertex] * weight }
+                if !target.tangents.isEmpty, !tangents.isEmpty {
+                    let delta = target.tangents[vertex] * weight
+                    tangents[vertex] += SIMD4(delta.x, delta.y, delta.z, 0)
+                }
             }
         }
         if !matrices.isEmpty, !jointSets.isEmpty {
             let normalMatrices = try matrices.map { try $0.inverted().transposed }
             for vertex in positions.indices {
-                var position = SIMD3<Float>.zero, normal = SIMD3<Float>.zero, sum: Float = 0
+                var position = SIMD3<Float>.zero, normal = SIMD3<Float>.zero, tangent = SIMD3<Float>.zero, sum: Float = 0
+                var column0 = SIMD3<Float>.zero, column1 = column0, column2 = column0
                 for set in jointSets.indices {
                     for lane in 0..<4 {
                         let weight = max(0, weightSets[set][vertex][lane])
@@ -139,14 +149,32 @@ public extension Primitive {
                         guard matrices.indices.contains(joint) else { throw VRMError.index("skin joint", joint) }
                         position += matrices[joint].point(positions[vertex]) * weight
                         normal += normalMatrices[joint].direction(normals[vertex]) * weight; sum += weight
+                        if !tangents.isEmpty {
+                            let t = tangents[vertex]
+                            tangent += matrices[joint].direction(SIMD3(t.x, t.y, t.z)) * weight
+                            column0 += matrices[joint].direction(SIMD3(1, 0, 0)) * weight
+                            column1 += matrices[joint].direction(SIMD3(0, 1, 0)) * weight
+                            column2 += matrices[joint].direction(SIMD3(0, 0, 1)) * weight
+                        }
                     }
                 }
-                if sum > 0 { positions[vertex] = position / sum; normals[vertex] = normalized(normal) }
+                if sum > 0 {
+                    positions[vertex] = position / sum; normals[vertex] = normalized(normal)
+                    if !tangents.isEmpty {
+                        let t = normalized(tangent), sign: Float = dot(cross(column0, column1), column2) < 0 ? -1 : 1
+                        tangents[vertex] = SIMD4(t.x, t.y, t.z, tangents[vertex].w * sign)
+                    }
+                }
             }
         }
         normals = normals.map { normalized($0) }
+        for vertex in tangents.indices {
+            let value = tangents[vertex], t = SIMD3(value.x, value.y, value.z)
+            let direction = normalized(t - normals[vertex] * dot(normals[vertex], t))
+            tangents[vertex] = SIMD4(direction.x, direction.y, direction.z, value.w)
+        }
         let uv = texcoords.indices.contains(texCoord) ? texcoords[texCoord] : Array(repeating: SIMD2<Float>.zero, count: positions.count)
-        return Geometry(positions: positions, normals: normals, texcoords: uv, colors: colors, triangles: triangles)
+        return Geometry(positions: positions, normals: normals, tangents: tangents, texcoords: uv, colors: colors, triangles: triangles)
     }
 }
 

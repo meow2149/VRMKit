@@ -23,6 +23,7 @@ public final class Instance {
     public private(set) var morphWeights: [[Float]]
     public private(set) var textureTransforms: [Int: TextureTransform] = [:]
     public private(set) var expressionWeights: [String: Float] = [:]
+    public private(set) var elapsedTime: Double = 0
     public var gaze: Gaze?
     public var springForce: SIMD3<Float> = .zero
     public var springsEnabled = true
@@ -100,6 +101,7 @@ public final class Instance {
 
     public func update(deltaTime: Float) throws {
         guard deltaTime.isFinite, deltaTime >= 0 else { throw VRMError.invalid("deltaTime must be finite and nonnegative") }
+        elapsedTime += Double(deltaTime)
         for (eye, rotation) in eyeBase { try pose.setRotation(rotation, at: eye) }; eyeBase.removeAll()
         try springSolver?.restore(pose: &pose)
         morphWeights = baseWeights
@@ -197,6 +199,15 @@ public final class Instance {
                 textureTransforms[bind.material] = transform
             }
         }
+        // Clamp after combining all color binds so overlapping expressions remain renderable.
+        for index in materials.indices {
+            for property in ["color", "shadeColor", "matcapColor", "rimColor", "outlineColor"] {
+                let value = materials[index].color(property)
+                materials[index].setColor(SIMD4(clamp(value.x), clamp(value.y), clamp(value.z), clamp(value.w)), property: property)
+            }
+            let emission = materials[index].emission
+            materials[index].emission = SIMD3(max(0, emission.x), max(0, emission.y), max(0, emission.z))
+        }
         for node in morphWeights.indices { morphWeights[node] = morphWeights[node].map { clamp($0) } }
     }
 
@@ -207,7 +218,7 @@ public final class Instance {
         let value = try document.mesh(mesh); meshes[mesh] = value; return value
     }
 
-    public func geometry(node: Int, primitive index: Int, firstPerson: Bool = false) throws -> Geometry {
+    public func geometry(node: Int, primitive index: Int, firstPerson: Bool = false, applyTextureTransform: Bool = true) throws -> Geometry {
         let primitive = try primitives(at: node).element(at: index, kind: "primitive")
         let json = try document.entry("nodes", at: node)
         var matrices: [Matrix4] = []
@@ -222,13 +233,13 @@ public final class Instance {
         let material = primitive.material.flatMap { materials.indices.contains($0) ? materials[$0] : nil }
         let slot = material?.primaryTexture
         var output = try primitive.deform(weights: morphWeights[node], matrices: matrices, texCoord: slot?.texCoord ?? 0)
-        if let index = primitive.material, let transform = textureTransforms[index] {
+        if applyTextureTransform, let index = primitive.material, let transform = textureTransforms[index] {
             let rotation = slot?.rotation ?? 0, c = cos(rotation), s = sin(rotation)
             output.texcoords = output.texcoords.map {
                 let p = $0 * transform.scale
                 return SIMD2(c * p.x - s * p.y, s * p.x + c * p.y) + transform.offset
             }
-        } else if let slot { output.texcoords = output.texcoords.map { slot.transform($0) } }
+        } else if applyTextureTransform, let slot { output.texcoords = output.texcoords.map { slot.transform($0) } }
         let mode = avatar?.viewModes[node] ?? .auto
         if (firstPerson && mode == .thirdPersonOnly) || (!firstPerson && mode == .firstPersonOnly) { output.triangles = [] }
         if firstPerson, mode == .auto, let head = avatar?.bones[.head] {

@@ -24,20 +24,6 @@ public struct TextureSlot: Equatable, Sendable {
     }
 }
 
-public struct ToonSettings: Equatable, Sendable {
-    public var shade: SIMD3<Float>
-    public var shift: Float
-    public var toony: Float
-    public var rim: SIMD3<Float>
-    public var rimPower: Float
-    public var rimLift: Float
-    public var outline: SIMD3<Float>
-    public var outlineWidth: Float
-    public var outlineMode: String
-    public var shadeTexture: TextureSlot?
-    public let raw: JSON
-}
-
 public struct Material: Equatable, Sendable {
     public enum AlphaMode: String, Sendable { case opaque = "OPAQUE", mask = "MASK", blend = "BLEND" }
     public let name: String?
@@ -74,13 +60,7 @@ public struct Material: Equatable, Sendable {
         normalTexture = TextureSlot(json: json["normalTexture"]); emissionTexture = TextureSlot(json: json["emissiveTexture"])
         metallicRoughnessTexture = TextureSlot(json: pbr["metallicRoughnessTexture"]); occlusionTexture = TextureSlot(json: json["occlusionTexture"])
         let mtoon = json["extensions"]["VRMC_materials_mtoon"]
-        if !mtoon.isNull {
-            toon = ToonSettings(shade: mtoon["shadeColorFactor"].vector3(default: SIMD3(repeating: 1)), shift: mtoon["shadingShiftFactor"].float ?? 0,
-                toony: clamp(mtoon["shadingToonyFactor"].float ?? 0.9), rim: mtoon["parametricRimColorFactor"].vector3(),
-                rimPower: mtoon["parametricRimFresnelPowerFactor"].float ?? 1, rimLift: mtoon["parametricRimLiftFactor"].float ?? 0,
-                outline: mtoon["outlineColorFactor"].vector3(), outlineWidth: mtoon["outlineWidthFactor"].float ?? 0,
-                outlineMode: mtoon["outlineWidthMode"].string ?? "none", shadeTexture: TextureSlot(json: mtoon["shadeMultiplyTexture"]), raw: mtoon)
-        } else { toon = nil }
+        toon = mtoon.isNull ? nil : ToonSettings(json: mtoon)
     }
 
     public func color(_ property: String) -> SIMD4<Float> {
@@ -89,6 +69,7 @@ public struct Material: Equatable, Sendable {
         case "color": return baseColor
         case "emissionColor": rgb = emission
         case "shadeColor": rgb = toon?.shade ?? SIMD3(repeating: 1)
+        case "matcapColor": rgb = toon?.matcap ?? SIMD3(repeating: 1)
         case "rimColor": rgb = toon?.rim ?? .zero
         case "outlineColor": rgb = toon?.outline ?? .zero
         default: rgb = .zero
@@ -102,6 +83,7 @@ public struct Material: Equatable, Sendable {
         case "color": baseColor = value
         case "emissionColor": emission = rgb
         case "shadeColor": toon?.shade = rgb
+        case "matcapColor": toon?.matcap = rgb
         case "rimColor": toon?.rim = rgb
         case "outlineColor": toon?.outline = rgb
         default: break

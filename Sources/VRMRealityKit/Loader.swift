@@ -34,11 +34,42 @@ public struct RenderOptions: Equatable, Sendable {
     public var lightDirection: SIMD3<Float>
     public var lightColor: SIMD3<Float>
     public var ambientColor: SIMD3<Float>
+    public var sceneLighting = true
+    public var sceneLightIntensityScale: Float = 0.001
+    public var exposure: Float = 1
+    public var shadows = true
+    public var shadowResolution = 512
+    public var maximumShadowFaces = 12
+    public var maximumLights = 16
+    public var shadowBias: Float = 0.0005
+    public var shadowNormalBias: Float = 0.001
+    public var shadowStrength: Float = 1
+    public var maximumTextureDimension = 16384
+    public var maximumAtlasDimension = 16384
+    /// Extra local bounds for screen-coordinate outline shells. This never clamps shader width.
+    public var outlineBoundsPadding: Float = 1
     public init(toonShading: Bool = true, outlines: Bool = true,
                 lightDirection: SIMD3<Float> = SIMD3(0.3, 0.8, 0.5),
                 lightColor: SIMD3<Float> = SIMD3(repeating: 1), ambientColor: SIMD3<Float> = SIMD3(repeating: 0.25)) {
         self.toonShading = toonShading; self.outlines = outlines
         self.lightDirection = lightDirection; self.lightColor = lightColor; self.ambientColor = ambientColor
+    }
+
+    func validate() throws {
+        guard maximumLights > 0, maximumLights <= 64, maximumShadowFaces >= 0, maximumShadowFaces <= 96,
+              shadowResolution >= 64, shadowResolution <= 4096,
+              maximumTextureDimension > 0, maximumTextureDimension <= 16384,
+              maximumAtlasDimension >= 512, maximumAtlasDimension <= 16384,
+              [sceneLightIntensityScale, exposure, shadowBias, shadowNormalBias, shadowStrength, outlineBoundsPadding].allSatisfy({ $0.isFinite && $0 >= 0 }),
+              shadowStrength <= 1,
+              [lightDirection.x, lightDirection.y, lightDirection.z].allSatisfy(\.isFinite),
+              [lightColor.x, lightColor.y, lightColor.z, ambientColor.x, ambientColor.y, ambientColor.z]
+                .allSatisfy({ $0.isFinite && $0 >= 0 }) else { throw VRMError.invalid("Render options") }
+    }
+
+    func hasSameAllocation(as other: RenderOptions) -> Bool {
+        maximumTextureDimension == other.maximumTextureDimension && maximumAtlasDimension == other.maximumAtlasDimension &&
+        shadowResolution == other.shadowResolution && maximumShadowFaces == other.maximumShadowFaces && maximumLights == other.maximumLights
     }
 }
 #endif

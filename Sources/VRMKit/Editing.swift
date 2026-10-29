@@ -88,10 +88,11 @@ public extension Document {
         guard !geometry.positions.isEmpty, !geometry.triangles.isEmpty, geometry.triangles.count % 3 == 0,
               geometry.triangles.allSatisfy({ Int($0) < geometry.positions.count }) else { throw VRMError.invalid("Mesh geometry") }
         if let material { _ = try entry("materials", at: material) }
-        for count in [geometry.normals.count, geometry.texcoords.count, geometry.colors.count] where count != 0 && count != geometry.positions.count { throw VRMError.invalid("Vertex attribute count") }
+        for count in [geometry.normals.count, geometry.tangents.count, geometry.texcoords.count, geometry.colors.count] where count != 0 && count != geometry.positions.count { throw VRMError.invalid("Vertex attribute count") }
         var copy = self, attributes: JSON = .object([:])
         attributes["POSITION"] = .number(Double(try copy.addFloatAccessor(geometry.positions.flatMap { [$0.x, $0.y, $0.z] }, type: "VEC3", target: 34962)))
         if !geometry.normals.isEmpty { attributes["NORMAL"] = .number(Double(try copy.addFloatAccessor(geometry.normals.flatMap { [$0.x, $0.y, $0.z] }, type: "VEC3", target: 34962))) }
+        if !geometry.tangents.isEmpty { attributes["TANGENT"] = .number(Double(try copy.addFloatAccessor(geometry.tangents.flatMap { [$0.x, $0.y, $0.z, $0.w] }, type: "VEC4", target: 34962))) }
         if !geometry.texcoords.isEmpty { attributes["TEXCOORD_0"] = .number(Double(try copy.addFloatAccessor(geometry.texcoords.flatMap { [$0.x, $0.y] }, type: "VEC2", target: 34962))) }
         if !geometry.colors.isEmpty { attributes["COLOR_0"] = .number(Double(try copy.addFloatAccessor(geometry.colors.flatMap { [$0.x, $0.y, $0.z, $0.w] }, type: "VEC4", target: 34962))) }
         var bytes = Data(); geometry.triangles.forEach { bytes.appendUInt32($0) }
